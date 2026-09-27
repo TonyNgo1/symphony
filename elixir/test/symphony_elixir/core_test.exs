@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
+  alias SymphonyElixir.TestSupport.Platform
 
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -102,12 +103,12 @@ defmodule SymphonyElixir.CoreTest do
 
   test "current WORKFLOW.md file is valid and complete" do
     original_workflow_path = Workflow.workflow_file_path()
-    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    previous_github_token = System.get_env("GITHUB_TOKEN")
 
     on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)
-    on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
+    on_exit(fn -> restore_env("GITHUB_TOKEN", previous_github_token) end)
 
-    System.put_env("LINEAR_API_KEY", "test-linear-api-key")
+    System.put_env("GITHUB_TOKEN", "test-github-token")
     Workflow.clear_workflow_file_path()
 
     assert {:ok, %{config: config, prompt: prompt}} = Workflow.load()
@@ -115,17 +116,22 @@ defmodule SymphonyElixir.CoreTest do
 
     tracker = Map.get(config, "tracker", %{})
     assert is_map(tracker)
-    assert Map.get(tracker, "kind") == "linear"
-    assert is_binary(get_in(tracker, ["provider", "project_slug"]))
+    assert Map.get(tracker, "kind") == "github"
+    assert get_in(tracker, ["provider", "repo"]) == "TonyNgo1/ArtCom"
+    assert get_in(tracker, ["provider", "project_number"]) == 1
     assert is_list(Map.get(tracker, "active_states"))
     assert is_list(Map.get(tracker, "terminal_states"))
 
     hooks = Map.get(config, "hooks", %{})
     assert is_map(hooks)
-    assert Map.get(hooks, "after_create") =~ "git clone --depth 1 https://github.com/openai/symphony ."
-    assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
-    assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
-    assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
+    assert Map.get(hooks, "after_create") =~ "git clone git@github.com:TonyNgo1/ArtCom.git ."
+    assert get_in(config, ["workspace", "retain_terminal"]) == true
+    assert get_in(config, ["agent", "max_concurrent_agents"]) == 2
+    assert get_in(config, ["agent", "max_concurrent_agents_by_state", "Integrating"]) == 1
+    assert get_in(config, ["codex", "approval_policy"]) == "on-request"
+    assert get_in(config, ["codex", "command"]) =~ "--config approvals_reviewer=auto_review"
+    assert get_in(config, ["codex", "thread_sandbox"]) == "workspace-write"
+    assert get_in(config, ["codex", "turn_sandbox_policy", "type"]) == "workspaceWrite"
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())
@@ -358,7 +364,9 @@ defmodule SymphonyElixir.CoreTest do
       )
 
     hook_marker = Path.join(test_root, "before-run-started")
-    hook_fifo = Path.join(test_root, "before-run-blocker")
+    hook_blocker = Path.join(test_root, "before-run-blocker")
+    File.mkdir_p!(test_root)
+    File.write!(hook_blocker, "")
     runtime_supervisor_name = Module.concat(__MODULE__, "AgentRuntimeSupervisor#{issue_suffix}")
     task_supervisor_name = Module.concat(__MODULE__, "TaskSupervisor#{issue_suffix}")
     orchestrator_name = Module.concat(__MODULE__, "RestartOrchestrator#{issue_suffix}")
@@ -383,7 +391,14 @@ defmodule SymphonyElixir.CoreTest do
 
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
       restart_default_runtime!()
-      File.rm_rf(test_root)
+      File.rm(hook_blocker)
+
+      assert eventually_value(fn ->
+               case File.rm_rf(test_root) do
+                 {:ok, _} -> true
+                 _ -> nil
+               end
+             end)
     end)
 
     if Process.whereis(SymphonyElixir.AgentRuntimeSupervisor) do
@@ -398,7 +413,10 @@ defmodule SymphonyElixir.CoreTest do
       tracker_kind: "memory",
       workspace_root: test_root,
       poll_interval_ms: 10,
-      hook_before_run: "mkfifo \"#{hook_fifo}\"; : > \"#{hook_marker}\"; read _ < \"#{hook_fifo}\"",
+      # A FIFO open can survive port closure on Windows and hold the test runner
+      # open forever. A pre-created blocker cannot be recreated by a late hook;
+      # cleanup removes it before waiting for Windows to release working directories.
+      hook_before_run: ": > \"#{hook_marker}\"; while [ -f \"#{hook_blocker}\" ]; do sleep 0.05; done",
       hook_timeout_ms: 60_000
     )
 
@@ -1482,39 +1500,37 @@ defmodule SymphonyElixir.CoreTest do
 
   test "in-repo WORKFLOW.md renders correctly" do
     workflow_path = Workflow.workflow_file_path()
-    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    previous_github_token = System.get_env("GITHUB_TOKEN")
 
-    on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
+    on_exit(fn -> restore_env("GITHUB_TOKEN", previous_github_token) end)
 
-    System.put_env("LINEAR_API_KEY", "test-linear-api-key")
+    System.put_env("GITHUB_TOKEN", "test-github-token")
     Workflow.set_workflow_file_path(Path.expand("WORKFLOW.md", File.cwd!()))
 
     issue = %Issue{
-      identifier: "MT-616",
+      identifier: "GH-616",
       title: "Use rich templates for WORKFLOW.md",
       description: "Render with rich template variables",
-      state: "In Progress",
-      url: "https://example.org/issues/MT-616/use-rich-templates-for-workflowmd",
-      labels: ["templating", "workflow"]
+      state: "In progress",
+      branch_name: "task/GH-616",
+      native_ref: %{"repo" => "TonyNgo1/ArtCom", "parent" => %{"identifier" => "GH-1", "state" => "In progress"}, "children" => []},
+      url: "https://github.com/TonyNgo1/ArtCom/issues/616",
+      labels: ["symphony", "type:task"]
     }
 
     on_exit(fn -> Workflow.set_workflow_file_path(workflow_path) end)
 
     prompt = PromptBuilder.build_prompt(issue, attempt: 2)
 
-    assert prompt =~ "You are working on a Linear ticket `MT-616`"
-    assert prompt =~ "Issue context:"
-    assert prompt =~ "Identifier: MT-616"
+    assert prompt =~ "persistent workspace for ArtCom issue GH-616"
+    assert prompt =~ "Parent feature branch: feature/GH-1"
+    assert prompt =~ "Branch: task/GH-616"
     assert prompt =~ "Title: Use rich templates for WORKFLOW.md"
-    assert prompt =~ "Current status: In Progress"
-    assert prompt =~ "https://example.org/issues/MT-616/use-rich-templates-for-workflowmd"
-    assert prompt =~ "This is an unattended orchestration session."
-    assert prompt =~ "Only stop early for a true external blocker"
-    assert prompt =~ "Do not include \"next steps for user\""
-    assert prompt =~ "open and follow `.codex/skills/land/SKILL.md`"
-    assert prompt =~ "Do not call `gh pr merge` directly"
-    assert prompt =~ "Follow-up context:"
-    assert prompt =~ "follow-up attempt #2"
+    assert prompt =~ "Project status: In progress"
+    assert prompt =~ "https://github.com/TonyNgo1/ArtCom/issues/616"
+    assert prompt =~ "Human Review is a hard pause"
+    assert prompt =~ "agent_workpad"
+    assert prompt =~ "Attempt 2"
   end
 
   test "prompt builder adds continuation guidance for retries" do
@@ -1728,7 +1744,7 @@ defmodule SymphonyElixir.CoreTest do
 
       File.mkdir_p!(test_root)
       System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
-      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+      System.put_env("PATH", test_root <> Platform.path_separator() <> (previous_path || ""))
 
       File.write!(fake_ssh, """
       #!/bin/sh
@@ -1750,7 +1766,7 @@ defmodule SymphonyElixir.CoreTest do
       esac
       """)
 
-      File.chmod!(fake_ssh, 0o755)
+      Platform.executable!(fake_ssh)
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: "~/.symphony-remote-workspaces",

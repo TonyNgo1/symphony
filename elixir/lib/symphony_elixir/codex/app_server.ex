@@ -4,11 +4,13 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH}
+  alias SymphonyElixir.{Codex.DynamicTool, Codex.Failure, Config, PathSafety, SSH}
+  alias SymphonyElixir.Codex.ModelSelection
 
   @initialize_id 1
   @thread_start_id 2
   @turn_start_id 3
+  @model_list_id 4
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
   @type session :: %{
@@ -21,12 +23,13 @@ defmodule SymphonyElixir.Codex.AppServer do
           thread_id: String.t(),
           workspace: Path.t(),
           worker_host: String.t() | nil,
-          dynamic_tool_binding: map()
+          dynamic_tool_binding: map(),
+          model_selection: map()
         }
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issue, opts \\ []) do
-    with {:ok, session} <- start_session(workspace, opts) do
+    with {:ok, session} <- start_session(workspace, Keyword.put(opts, :issue, issue)) do
       try do
         run_turn(session, prompt, issue, opts)
       after
@@ -39,14 +42,15 @@ defmodule SymphonyElixir.Codex.AppServer do
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
     dynamic_tool_binding = DynamicTool.bind()
+    selection = ModelSelection.requested(Keyword.get(opts, :issue, %{}))
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, port} <- start_port(expanded_workspace, worker_host, dynamic_tool_binding) do
       metadata = port_metadata(port, worker_host)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
-           {:ok, thread_id} <-
-             do_start_session(port, expanded_workspace, session_policies, dynamic_tool_binding) do
+           {:ok, thread_id, resolved} <-
+             do_start_session(port, expanded_workspace, session_policies, dynamic_tool_binding, selection) do
         {:ok,
          %{
            port: port,
@@ -58,9 +62,14 @@ defmodule SymphonyElixir.Codex.AppServer do
            thread_id: thread_id,
            workspace: expanded_workspace,
            worker_host: worker_host,
-           dynamic_tool_binding: dynamic_tool_binding
+           dynamic_tool_binding: dynamic_tool_binding,
+           model_selection: resolved
          }}
       else
+        {:error, {:model_selection_invalid, message, _resolved}} ->
+          stop_port(port)
+          {:error, {:model_selection_invalid, message, selection}}
+
         {:error, reason} ->
           stop_port(port)
           {:error, reason}
@@ -78,7 +87,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           turn_sandbox_policy: turn_sandbox_policy,
           thread_id: thread_id,
           workspace: workspace,
-          dynamic_tool_binding: dynamic_tool_binding
+          dynamic_tool_binding: dynamic_tool_binding,
+          model_selection: selection
         },
         prompt,
         issue,
@@ -91,10 +101,10 @@ defmodule SymphonyElixir.Codex.AppServer do
         DynamicTool.execute(tool, arguments, dynamic_tool_binding, issue: issue)
       end)
 
-    case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
+    case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy, selection) do
       {:ok, turn_id} ->
         session_id = "#{thread_id}-#{turn_id}"
-        Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
+        Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id} model=#{selection.model} effort=#{selection.effort} role=#{selection.role}")
 
         emit_message(
           on_message,
@@ -102,7 +112,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           %{
             session_id: session_id,
             thread_id: thread_id,
-            turn_id: turn_id
+            turn_id: turn_id,
+            model_selection: selection
           },
           metadata
         )
@@ -304,59 +315,110 @@ defmodule SymphonyElixir.Codex.AppServer do
     Config.codex_runtime_settings(workspace, remote: true)
   end
 
-  defp do_start_session(port, workspace, session_policies, dynamic_tool_binding) do
-    case send_initialize(port) do
-      :ok -> start_thread(port, workspace, session_policies, dynamic_tool_binding)
-      {:error, reason} -> {:error, reason}
+  defp do_start_session(port, workspace, session_policies, dynamic_tool_binding, selection) do
+    with :ok <- send_initialize(port),
+         {:ok, resolved} <- resolve_model(port, selection),
+         {:ok, thread_id} <- start_thread(port, workspace, session_policies, dynamic_tool_binding, resolved) do
+      {:ok, thread_id, resolved}
+    end
+  end
+
+  defp resolve_model(port, selection) do
+    if ModelSelection.explicit?(selection) do
+      with {:ok, models} <- list_models(port, nil, [], []), do: ModelSelection.validate(selection, models)
+    else
+      {:ok, selection}
+    end
+  end
+
+  defp list_models(port, cursor, models, seen) do
+    send_message(port, %{"method" => "model/list", "id" => @model_list_id, "params" => %{"cursor" => cursor, "includeHidden" => true}})
+
+    case await_response(port, @model_list_id) do
+      {:ok, %{"data" => page} = result} when is_list(page) ->
+        next = result["nextCursor"]
+
+        cond do
+          is_nil(next) -> {:ok, models ++ page}
+          not is_binary(next) or next in seen -> {:error, :invalid_model_catalog_cursor}
+          true -> list_models(port, next, models ++ page, [next | seen])
+        end
+
+      {:error, _} = error ->
+        error
+
+      _ ->
+        {:error, :invalid_model_catalog}
     end
   end
 
   defp start_thread(
          port,
          workspace,
-         %{approval_policy: approval_policy, thread_sandbox: thread_sandbox},
-         dynamic_tool_binding
+         %{approval_policy: approval_policy, thread_sandbox: thread_sandbox, project_id: project_id},
+         dynamic_tool_binding,
+         selection
        ) do
     send_message(port, %{
       "method" => "thread/start",
       "id" => @thread_start_id,
-      "params" => %{
-        "approvalPolicy" => approval_policy,
-        "sandbox" => thread_sandbox,
-        "cwd" => workspace,
-        "dynamicTools" => dynamic_tool_binding.tool_specs
-      }
+      "params" =>
+        Map.merge(
+          %{
+            "approvalPolicy" => approval_policy,
+            "sandbox" => thread_sandbox,
+            "cwd" => workspace,
+            "dynamicTools" => dynamic_tool_binding.tool_specs
+          },
+          ModelSelection.thread_params(selection)
+        )
+        |> then(fn params -> if project_id, do: Map.put(params, "projectId", project_id), else: params end)
     })
 
-    case await_response(port, @thread_start_id) do
-      {:ok, %{"thread" => thread_payload}} ->
-        case thread_payload do
-          %{"id" => thread_id} -> {:ok, thread_id}
-          _ -> {:error, {:invalid_thread_payload, thread_payload}}
-        end
+    with {:ok, %{"thread" => thread_payload} = response} <- await_response(port, @thread_start_id),
+         :ok <- confirm_project_assignment(thread_payload, project_id) do
+      cond do
+        selection.model && response["model"] != selection.model ->
+          {:error, {:model_selection_invalid, "Codex did not confirm requested model #{selection.model}", selection}}
 
-      other ->
-        other
+        is_map(thread_payload) and is_binary(thread_payload["id"]) ->
+          {:ok, thread_payload["id"]}
+
+        true ->
+          {:error, {:invalid_thread_payload, thread_payload}}
+      end
     end
   end
 
-  defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
+  defp confirm_project_assignment(_thread_payload, nil), do: :ok
+  defp confirm_project_assignment(%{"projectId" => project_id}, project_id), do: :ok
+
+  defp confirm_project_assignment(thread_payload, project_id) do
+    actual = if is_map(thread_payload), do: thread_payload["projectId"], else: nil
+    {:error, {:project_assignment_mismatch, project_id, actual}}
+  end
+
+  defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy, selection) do
     send_message(port, %{
       "method" => "turn/start",
       "id" => @turn_start_id,
-      "params" => %{
-        "threadId" => thread_id,
-        "input" => [
+      "params" =>
+        Map.merge(
           %{
-            "type" => "text",
-            "text" => prompt
-          }
-        ],
-        "cwd" => workspace,
-        "title" => "#{issue.identifier}: #{issue.title}",
-        "approvalPolicy" => approval_policy,
-        "sandboxPolicy" => turn_sandbox_policy
-      }
+            "threadId" => thread_id,
+            "input" => [
+              %{
+                "type" => "text",
+                "text" => prompt
+              }
+            ],
+            "cwd" => workspace,
+            "title" => "#{issue.identifier}: #{issue.title}",
+            "approvalPolicy" => approval_policy,
+            "sandboxPolicy" => turn_sandbox_policy
+          },
+          ModelSelection.turn_params(selection)
+        )
     })
 
     case await_response(port, @turn_start_id) do
@@ -405,8 +467,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     case Jason.decode(payload_string) do
       {:ok, %{"method" => "turn/completed"} = payload} ->
-        emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
-        {:ok, :turn_completed}
+        handle_completed_turn(payload, on_message, payload_string, port)
 
       {:ok, %{"method" => "turn/failed", "params" => _} = payload} ->
         emit_turn_event(
@@ -418,7 +479,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           Map.get(payload, "params")
         )
 
-        {:error, {:turn_failed, Map.get(payload, "params")}}
+        failed_turn_result(payload)
 
       {:ok, %{"method" => "turn/cancelled", "params" => _} = payload} ->
         emit_turn_event(
@@ -477,6 +538,31 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
+  @doc false
+  @spec completed_turn_result(map()) :: {:ok, :turn_completed} | {:error, term()}
+  def completed_turn_result(payload) do
+    turn = get_in(payload, ["params", "turn"]) || %{}
+
+    cond do
+      Failure.usage_limit?(payload) -> {:error, :usage_limit_exceeded}
+      turn["status"] in ["failed", "interrupted", "cancelled"] -> {:error, {:turn_failed, turn}}
+      true -> {:ok, :turn_completed}
+    end
+  end
+
+  defp handle_completed_turn(payload, on_message, raw, port) do
+    result = completed_turn_result(payload)
+    event = if match?({:ok, _}, result), do: :turn_completed, else: :turn_failed
+    emit_turn_event(on_message, event, payload, raw, port, payload)
+    result
+  end
+
+  defp failed_turn_result(payload) do
+    if Failure.usage_limit?(payload),
+      do: {:error, :usage_limit_exceeded},
+      else: {:error, {:turn_failed, Map.get(payload, "params")}}
+  end
+
   defp emit_turn_event(on_message, event, payload, payload_string, port, payload_details) do
     emit_message(
       on_message,
@@ -490,7 +576,19 @@ defmodule SymphonyElixir.Codex.AppServer do
     )
   end
 
-  defp handle_turn_method(
+  defp handle_turn_method(port, on_message, payload, raw, method, timeout, executor, approvals)
+       when method in ["error", "codex/event/error", "codex/event"] do
+    if Failure.usage_limit?(payload) do
+      {:error, :usage_limit_exceeded}
+    else
+      handle_other_turn_method(port, on_message, payload, raw, method, timeout, executor, approvals)
+    end
+  end
+
+  defp handle_turn_method(port, on_message, payload, raw, method, timeout, executor, approvals),
+    do: handle_other_turn_method(port, on_message, payload, raw, method, timeout, executor, approvals)
+
+  defp handle_other_turn_method(
          port,
          on_message,
          payload,
@@ -596,6 +694,8 @@ defmodule SymphonyElixir.Codex.AppServer do
        ) do
     tool_name = tool_call_name(params)
     arguments = tool_call_arguments(params)
+
+    emit_message(on_message, :tool_call_started, %{tool: tool_name, arguments: arguments}, metadata)
 
     result =
       tool_name

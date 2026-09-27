@@ -23,6 +23,7 @@ defmodule SymphonyElixir.Workspace do
            {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host) do
         case maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
           :ok ->
+            if is_nil(worker_host), do: File.rm(initializing_marker(workspace))
             {:ok, workspace}
 
           {:error, _reason} = error ->
@@ -86,9 +87,13 @@ defmodule SymphonyElixir.Workspace do
 
   defp create_workspace(workspace) do
     File.rm_rf!(workspace)
+    File.mkdir_p!(Path.dirname(workspace))
+    File.write!(initializing_marker(workspace), "initial workspace setup has not completed\n")
     File.mkdir_p!(workspace)
     {:ok, workspace, true}
   end
+
+  defp initializing_marker(workspace), do: workspace <> ".initializing"
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
   def remove(workspace), do: remove(workspace, nil)
@@ -309,6 +314,7 @@ defmodule SymphonyElixir.Workspace do
   defp cleanup_failed_new_workspace(workspace, true, nil) do
     case File.rm_rf(workspace) do
       {:ok, _removed} ->
+        File.rm(initializing_marker(workspace))
         :ok
 
       {:error, reason, path} ->

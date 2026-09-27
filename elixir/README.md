@@ -1,5 +1,36 @@
 # Symphony Elixir
 
+GitHub Projects can supply optional single-select `Model` and `Reasoning effort`
+fields. `codex.model` and `codex.reasoning_effort` are implementation defaults;
+`review_model` / `review_reasoning_effort` and `integration_model` /
+`integration_reasoning_effort` under `codex` select fresh review/integration workers.
+For issues labeled `type:feature`, `parent_review_model` and
+`parent_review_reasoning_effort` override the review settings independently;
+missing/blank values fall back to review settings, then global settings. The ArtCom
+workflow uses high effort throughout, Sol for child reviews, Astra for parent
+reviews, and Sol for integration. Its planner reserves Luna for the simplest
+mechanical changes with an established pattern and automated check, uses Sol for
+small clear implementations, and Astra for architecture, ambiguity or subtle
+correctness. Existing explicit Project effort overrides must be set to high or
+cleared before releasing work under this policy.
+Settings are validated against `model/list` and pinned for a worker's lifetime.
+Invalid selections block only the affected issue until corrected or restarted.
+`mix github.models GH-123 --model <id> --effort <value>` validates, writes and reads
+back Project selections without starting Symphony. With no flags it reads them;
+`--clear-model --clear-effort` restores defaults. Requires `GITHUB_TOKEN` and an
+existing Project field/option setup. See ArtCom's `docs/SYMPHONY_MODELS.md` for the
+complete operator/planner workflow. The no-op harness supports `--model-routing`.
+The planner command initializes its GitHub HTTP service and reloads the selected
+workflow without starting the scheduler.
+
+For native Windows tests, put Git Bash on PATH and provide Windows PowerShell and
+Python 3 (`py`). The suite compiles a temporary native shell-fixture launcher using
+PowerShell's built-in C# compiler and uses directory junctions for link-safety tests;
+no administrator privileges are needed. Run `mix test --cover` for the full offline
+suite. The existing coverage scope/100% threshold is unchanged; live tracker tests
+remain explicitly opt-in. The verified Windows run has 358 tests, zero failures,
+six live tests skipped, and passes the configured coverage gate.
+
 This directory contains the current Elixir/OTP implementation of Symphony, based on
 [`SPEC.md`](../SPEC.md) at the repository root.
 
@@ -22,13 +53,14 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 5. Keeps Codex working on the issue until the work is done
 
 During app-server sessions, the selected tracker adapter may advertise provider-native tools. The
-Linear serves `linear_graphql`, GitHub Issues serves `github_api`, Jira Cloud serves
+Linear serves `linear_graphql`, GitHub serves `github_api`, `set_project_status` and `agent_workpad`, Jira Cloud serves
 `jira_rest`, Asana serves `asana_api`, and GitLab serves `gitlab_api`. Symphony executes those
 tools with configured host-side auth and removes declared tracker-token environment variables from
 the Codex child, so the agent does not need a second tracker login.
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
-Symphony stops the active agent for that issue and cleans up matching workspaces.
+Symphony stops the active agent for that issue and cleans up matching workspaces unless
+`workspace.retain_terminal: true` is configured.
 
 If Codex reports that operator input, approval, or MCP elicitation is required, Symphony keeps the
 issue claimed and exposes it as blocked in the runtime state, JSON API, and dashboard. Blocked
@@ -158,6 +190,13 @@ Notes:
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`
+  - `codex.project_id` optionally assigns every new worker thread to an existing Codex project.
+    Use the ID returned by `project/list` on the worker's app server; desktop tools may expose a
+    different legacy ID. The ID is local to that server's Codex home. It does not change the issue
+    workspace or sandbox. Omission preserves normal project behavior. A configured ID must be
+    confirmed in the `thread/start` response before any agent turn starts. Unknown IDs or older
+    servers that omit confirmation fail startup and follow ordinary worker retry/backoff.
+    Workflow reloads affect new sessions only; existing tasks are never reassigned.
   - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
 - `codex.turn_timeout_ms` is the maximum silence interval while a turn is streaming. Each
   app-server update resets it; it is not a total turn runtime cap.
@@ -250,17 +289,77 @@ codex:
 
 ### GitHub Issues adapter
 
-- Config: use `tracker.kind: github` with required `tracker.provider.repo` in `owner/repo` form,
-  optional `token` (defaults to `GITHUB_TOKEN` and accepts `$VAR`), and optional `api_url`
-  (default `https://api.github.com`, HTTPS only). Set explicit `active_states` and
-  `terminal_states`; active entries may be `open` and terminal entries may be `closed`.
-- Reads and identity: polling is scoped to the configured repository; `issue.id` is the
-  repository issue number, `issue.identifier` is `GH-<number>`, hidden or deleted `404` issues are
-  omitted on refresh, and pull requests returned by the Issues API are not dispatchable.
-- Tool and auth: `github_api` accepts a relative REST `path` plus optional `params` and JSON
-  `body`; Symphony executes it host-side with the session-bound token, removes configured tracker
-  credentials and provider authentication aliases from the Codex child, and leaves raw tool access
-  limited by that token's GitHub permissions.
+- Config: `tracker.kind: github`, provider `repo` (`owner/repo`), `project_number` (positive integer),
+  `token` (defaults to `GITHUB_TOKEN`, accepts `$VAR`), `project_owner` (defaults to repository owner),
+  `project_owner_type` (`user` or `organization`), and `status_field` (default `Status`).
+  Optional `api_url` defaults to `https://api.github.com` and requires HTTPS.
+- Project statuses: Backlog, Ready, In progress, In review, Integrating, Human Review, Done.
+  Only the middle four autonomous states dispatch. Done is terminal; Human Review is a hard pause.
+  Native open/closed-only GitHub configurations are no longer supported by this fork.
+- All managed issues need the configured required labels plus exactly one `type:feature` or
+  `type:task` label. A task needs a native parent feature in the project and In progress.
+  A Ready parent bootstraps its branch; other active parent states wait until all children are Done.
+  Native blocked-by edges independently gate every active state. Never block parent bootstrap on children.
+- All REST connections follow Link pagination. Project Status determines completion for managed blockers;
+  native closed determines completion for blockers outside the project. Failed relationship reads fail closed.
+- Scheduling batches native relationships through GraphQL (10 issues per request, 20 entries per
+  connection). Truncated connections fall back to complete REST pagination for that issue;
+  incomplete/error payloads never dispatch. Required labels are filtered before relationship reads.
+- REST GETs use credential-scoped ETags and always revalidate with GitHub. No stale snapshot is
+  served during failures. The in-memory cache holds at most 512 representations for five minutes;
+  mutation attempts invalidate it. REST and GraphQL quota exhaustion suppress further requests
+  for that credential/resource until reset; secondary limits back off across both resources.
+  Requests already in flight can finish. Mutations are never automatically replayed by transport.
+- `/api/v1/state.tracker_api` reports process-local request counts, conditional hits, GraphQL
+  points, suppressed attempts and quota reset times. It excludes external GitHub clients and
+  the harness controller. Cache, counters and GitHub backoff reset with the HTTP service.
+- `github_api` is read-only. `set_project_status` binds changes to the current issue and worker role;
+  workers cannot leave Human Review or send a reviewed parent directly to Integrating.
+  `agent_workpad` reads/upserts one comment of at most 40 lines and rejects duplicate workpads.
+- GitHub role changes end the worker; the next role starts a fresh thread in the same workspace.
+  The prompt labels the parent's Project status supplied by the adapter. Fresh child
+  implementation creates an absent task branch from the existing parent feature branch;
+  review/integration treat a missing source branch as a blocker.
+  Worker-initiated phase changes register their target before the status write.
+  Reconciliation lets the tool response and turn finish before releasing the claim,
+  with a 60-second bound for stuck handoffs. Unrelated state changes and quota stops
+  still stop the worker immediately.
+- Review approval requires passing validation evidence for the current source SHA;
+  bug-labeled issues also require a permanent regression check with failed-before and
+  passed-after evidence. The adapter owns the workpad's reserved `Review:` line.
+- `Done` requires that saved review, an unchanged source head, passing validation for
+  the exact remote target head, and GitHub-confirmed ancestry into the native parent's
+  feature branch (children) or main (features). See WORKFLOW.md for the evidence schema.
+  Every issue requires one `symphony-acceptance` JSON block (version 1, criteria).
+  Approval and Done require exactly one passing acceptance entry per ID, at the
+  respective commit. The protected review binds the entire acceptance contract;
+  changed scope or validation policy requires fresh review. `github_check` criteria
+  verify the remote check name, publisher app ID, exact SHA and successful completion.
+  `review` criteria remain explicit reviewer attestations; the gate does not run local tests.
+  Missing contracts and legacy review records fail closed; migrate approved scope and
+  obtain a new review before continuing. See WORKFLOW.md for both evidence modes.
+  Set `workspace.retain_terminal: true` for retained Done workspaces.
+- Structured Codex quota errors immediately stop the failing worker and pause dispatch until the
+  Symphony process restarts. This pause survives scheduler supervision restarts and workflow reloads.
+- Opt-in `agent.recovery_enabled` adds local GitHub worker recovery. ArtCom enables it.
+  `checkpoint_interval_turns`, `max_consecutive_failures`, `max_no_progress_runs`, and
+  `max_rework_cycles` are positive integers, each defaulting to 3. Records live under
+  the configured workspace root's `.symphony-recovery/`, outside individual clones.
+  Every successful workpad write receives a runtime-owned `Worker:` line with task ID,
+  role, workspace and recovery path; reserve that line plus the protected Review: line.
+  Missing checkpoints trigger at most one extra checkpoint-only turn at each interval
+  and before normal rotation. A refusal fails the attempt; quota errors get no extra turn.
+  Limits persist across restarts and move the issue to Human Review, clearing old approval.
+  If GitHub fails, a durable local pause blocks workers while publication retries.
+  A human's release to an active state resets the limits. Repository snapshots include
+  staged/unstaged/untracked content; workpad churn alone is not progress. Review rework
+  remains cumulative even when implementation changes. Other trackers/SSH retain their behavior.
+  Use `mix github.handoff GH-123 --workflow /path/to/WORKFLOW.md` with the same workspace
+  environment as the launcher to inspect the latest attempt and 19 previous attempts.
+  ArtCom's `run-symphony.ps1 -Handoff GH-123` loads that environment and works while the
+  scheduler is running. The runtime saves IDs; it does not automatically resume human tasks.
+- The ArtCom host launcher supports `-CheckOnly` for read-only configuration, board and prompt validation.
+  The bundled WORKFLOW.md is the ArtCom example; the host repository's root workflow is authoritative.
 
 ### Jira Cloud adapter
 
@@ -312,6 +411,29 @@ The observability UI now runs on a minimal Phoenix stack:
 
 ## Testing
 
+`mix github.plan plan.json --output validated-plan.json` validates a version-1 plan
+offline and generates issue bodies with the acceptance contract. It checks required
+scope coverage, schema, unique IDs, parent relationships, dependencies and lifecycle
+deadlocks. It makes no GitHub writes and starts no scheduler. Publication still needs
+native relationships and a board read-back matching the validated bundle. The ArtCom
+host guide `docs/SYMPHONY_PLANNING.md` and `docs/symphony-plan.example.json` document the format.
+
+The opt-in post-planning GitHub acceptance harness is in `scripts/e2e/run.py`.
+It uses `scenario.json`, creates real issues and native relationships, and runs
+the actual scheduler with either scripted app-server workers or real Codex.
+Normal workflow status changes must come from workers; the controller only
+releases Backlog, simulates human approvals, and quarantines its fixtures on failure.
+Tasks make empty commits and merges while asserting unchanged tracked file trees.
+The example workflow and real-Codex harness use workspace-write with on-request
+approvals and Codex's automatic reviewer, allowing reviewed Git metadata writes.
+Unresolved approval requests still stop the worker; the harness does not grant
+full access or have Symphony approve these requests unconditionally.
+The ArtCom host exposes `run-symphony-e2e.ps1`; its operational guide is
+`docs/SYMPHONY_E2E.md`. Reports and workspaces are retained under `log/e2e/`.
+
+Run the portable offline harness checks with
+`python -m unittest discover -s scripts/e2e -p test_harness.py -v`.
+
 ```bash
 make all
 ```
@@ -346,11 +468,13 @@ The live test creates a temporary Linear project and issue, writes a temporary `
 a real agent turn, verifies the workspace side effect, requires Codex to comment on and close the
 Linear issue, then marks the project completed so the run remains visible in Linear.
 
-Run the opt-in GitHub Issues live test with a disposable/scratch repository:
+Run the opt-in read-only GitHub Project contract test (no issues are created or changed):
 
 ```bash
 cd elixir
 export SYMPHONY_LIVE_GITHUB_REPO=owner/scratch-repo
+export SYMPHONY_LIVE_GITHUB_PROJECT_NUMBER=1
+export SYMPHONY_LIVE_GITHUB_PROJECT_OWNER=owner
 export GITHUB_TOKEN=...
 SYMPHONY_RUN_GITHUB_LIVE_E2E=1 mix test test/symphony_elixir/github_live_e2e_test.exs
 ```
@@ -399,6 +523,27 @@ actively running subagents, which is very useful during development.
 
 Launch `codex` in your repo, give it the URL to the Symphony repo, and ask it to set things up for
 you.
+
+## Asset-bound human approval (GitHub)
+
+ArtCom's model resolver forces `gpt-6-astra` / `high` for implementation of issues
+with the `asset-generation` label or a valid `human_asset` acceptance contract.
+This overrides Project/global implementation settings; catalog failures block
+without substitution. Review/integration selections remain independent. The plan
+compiler accepts `asset_generation: true`, requires a human_asset criterion and
+emits the label. Existing worker sessions keep their original model; newly classified
+implementation work rotates before its next turn so the replacement uses Astra.
+
+The acceptance validator supports `human_asset` policies with `manifest`, `reviewers`
+and `instructions`. An allowlisted GitHub User must post a separate
+`## Asset Approval` comment with a fenced `symphony-asset-approval` JSON object:
+version 1, decision `approved`, the complete `criterion`, manifest path and
+`manifest_blob` (Git blob SHA). Workers supply `approval_comment_id` in that
+criterion's evidence. Review and Done verify the comment and all manifest files
+against remote source/target trees. See the consuming ArtCom repository's
+`docs/ASSET_REVIEW.md` and `tools/asset_review.py` for packaging and human release.
+No approval is inferred from a board move or an agent workpad. Missing human
+approval pauses at Human Review without evidence; the human returns it to In review.
 
 ## License
 

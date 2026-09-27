@@ -1,1 +1,5 @@
 test/fixtures/status_dashboard_snapshots/* linguist-generated=true
+*.ex text eol=lf
+*.exs text eol=lf
+*.sh text eol=lf
+test/fixtures/status_dashboard_snapshots/*.txt text eol=lf

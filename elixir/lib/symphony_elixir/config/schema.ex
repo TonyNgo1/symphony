@@ -112,12 +112,13 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:root, :string, default: Path.join(System.tmp_dir!(), "symphony_workspaces"))
+      field(:retain_terminal, :boolean, default: false)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:root], empty_values: [])
+      |> cast(attrs, [:root, :retain_terminal], empty_values: [])
     end
   end
 
@@ -151,6 +152,11 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:max_concurrent_agents, :integer, default: 10)
       field(:max_turns, :integer, default: 20)
+      field(:recovery_enabled, :boolean, default: false)
+      field(:checkpoint_interval_turns, :integer, default: 3)
+      field(:max_consecutive_failures, :integer, default: 3)
+      field(:max_no_progress_runs, :integer, default: 3)
+      field(:max_rework_cycles, :integer, default: 3)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
       field(:max_concurrent_agents_by_state, :map, default: %{})
     end
@@ -160,11 +166,25 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
+        [
+          :max_concurrent_agents,
+          :max_turns,
+          :max_retry_backoff_ms,
+          :max_concurrent_agents_by_state,
+          :recovery_enabled,
+          :checkpoint_interval_turns,
+          :max_consecutive_failures,
+          :max_no_progress_runs,
+          :max_rework_cycles
+        ],
         empty_values: []
       )
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
+      |> validate_number(:checkpoint_interval_turns, greater_than: 0)
+      |> validate_number(:max_consecutive_failures, greater_than: 0)
+      |> validate_number(:max_no_progress_runs, greater_than: 0)
+      |> validate_number(:max_rework_cycles, greater_than: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
@@ -179,6 +199,15 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:command, :string, default: "codex app-server")
+      field(:project_id, :string)
+      field(:model, :string)
+      field(:reasoning_effort, :string)
+      field(:review_model, :string)
+      field(:review_reasoning_effort, :string)
+      field(:parent_review_model, :string)
+      field(:parent_review_reasoning_effort, :string)
+      field(:integration_model, :string)
+      field(:integration_reasoning_effort, :string)
 
       field(:approval_policy, StringOrMap,
         default: %{
@@ -204,6 +233,15 @@ defmodule SymphonyElixir.Config.Schema do
         attrs,
         [
           :command,
+          :project_id,
+          :model,
+          :reasoning_effort,
+          :review_model,
+          :review_reasoning_effort,
+          :parent_review_model,
+          :parent_review_reasoning_effort,
+          :integration_model,
+          :integration_reasoning_effort,
           :approval_policy,
           :thread_sandbox,
           :turn_sandbox_policy,
@@ -214,6 +252,7 @@ defmodule SymphonyElixir.Config.Schema do
         empty_values: []
       )
       |> validate_required([:command])
+      |> validate_format(:project_id, ~r/^\S+$/)
       |> validate_change(:command, fn :command, command ->
         if command != "" and String.trim(command) == "" do
           [command: "can't be blank"]

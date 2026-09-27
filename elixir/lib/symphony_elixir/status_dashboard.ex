@@ -317,7 +317,8 @@ defmodule SymphonyElixir.StatusDashboard do
              retrying: retrying,
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
-             polling: Map.get(snapshot, :polling)
+             polling: Map.get(snapshot, :polling),
+             dispatch_paused: Map.get(snapshot, :dispatch_paused)
            }},
           update_token_samples(token_samples, now_ms, total_tokens)
         }
@@ -365,6 +366,7 @@ defmodule SymphonyElixir.StatusDashboard do
            colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
            project_link_lines,
            project_refresh_line,
+           if(Map.get(snapshot, :dispatch_paused), do: [colorize("│ PAUSED: usage limit reached; restart Symphony to resume", @ansi_red)], else: []),
            colorize("├─ Running", @ansi_bold),
            "│",
            running_table_header_row(running_event_width),

@@ -4,6 +4,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.TestSupport.Platform
 
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
@@ -33,7 +34,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue("S-1")
       assert File.exists?(Path.join(workspace, ".git"))
-      assert File.read!(Path.join(workspace, "README.md")) == "hook clone\n"
+      assert String.replace(File.read!(Path.join(workspace, "README.md")), "\r\n", "\n") == "hook clone\n"
       assert File.read!(Path.join([workspace, "keep", "file.txt"])) == "keep me"
     after
       File.rm_rf(test_root)
@@ -182,7 +183,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       File.mkdir_p!(workspace_root)
       File.mkdir_p!(outside_root)
-      File.ln_s!(outside_root, symlink_path)
+      Platform.directory_link!(outside_root, symlink_path)
 
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
 
@@ -212,7 +213,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       File.mkdir_p!(recorded_root)
       File.mkdir_p!(outside_root)
-      File.ln_s!(outside_root, recorded_workspace)
+      Platform.directory_link!(outside_root, recorded_workspace)
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: current_root,
@@ -244,7 +245,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       linked_root = Path.join(test_root, "linked-workspaces")
 
       File.mkdir_p!(actual_root)
-      File.ln_s!(actual_root, linked_root)
+      Platform.directory_link!(actual_root, linked_root)
 
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: linked_root)
 
@@ -1011,7 +1012,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.tracker.api_key == nil
     assert config.tracker.project_slug == nil
     assert config.tracker.required_labels == []
-    assert config.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
+    assert Path.expand(config.workspace.root) == Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))
     assert config.worker.max_concurrent_agents_per_host == nil
     assert config.agent.max_concurrent_agents == 10
     assert config.codex.command == "codex app-server"
@@ -1194,7 +1195,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.tracker.api_key == api_key
     assert config.tracker.provider["api_key"] == "$#{api_key_env_var}"
     assert config.tracker.secret_environment_names == ["LINEAR_API_KEY", api_key_env_var]
-    assert config.workspace.root == Path.expand(workspace_root)
+    # Configuration preserves remote paths; local expansion happens at workspace use.
+    assert config.workspace.root == workspace_root
     assert config.codex.command == "#{codex_bin} app-server"
   end
 
@@ -1621,7 +1623,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       File.mkdir_p!(test_root)
       System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
-      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+      System.put_env("PATH", test_root <> Platform.path_separator() <> (previous_path || ""))
 
       File.write!(fake_ssh, """
       #!/bin/sh
@@ -1637,7 +1639,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       exit 0
       """)
 
-      File.chmod!(fake_ssh, 0o755)
+      Platform.executable!(fake_ssh)
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,

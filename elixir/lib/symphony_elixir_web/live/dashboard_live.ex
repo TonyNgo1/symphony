@@ -169,6 +169,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     </td>
                     <td>
                       <div class="session-stack">
+                        <%= if entry.model_selection do %>
+                          <span class="muted"><%= entry.model_selection.model || "Codex default" %> · <%= entry.model_selection.effort || "default effort" %></span>
+                        <% end %>
                         <%= if entry.session_id do %>
                           <button
                             type="button"

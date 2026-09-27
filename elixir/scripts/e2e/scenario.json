@@ -1,0 +1,21 @@
+{
+  "description": "Approved no-op plan: two features, parallel siblings, child and feature dependencies.",
+  "model_routing": {
+    "implementation": {"model": "gpt-6-sol", "effort": "high"},
+    "review": {"model": "gpt-6-sol", "effort": "high"},
+    "parent_review": {"model": "gpt-6-astra", "effort": "high"},
+    "integration": {"model": "gpt-6-sol", "effort": "high"},
+    "issues": {
+      "A": {"model": "gpt-6-luna", "effort": "high"},
+      "C": {"model": "gpt-6-sol", "effort": "high"}
+    }
+  },
+  "issues": [
+    {"key": "P", "kind": "feature", "parent": null, "blockers": []},
+    {"key": "A", "kind": "task", "parent": "P", "blockers": []},
+    {"key": "B", "kind": "task", "parent": "P", "blockers": ["A"]},
+    {"key": "C", "kind": "task", "parent": "P", "blockers": []},
+    {"key": "Q", "kind": "feature", "parent": null, "blockers": ["P"]},
+    {"key": "D", "kind": "task", "parent": "Q", "blockers": []}
+  ]
+}

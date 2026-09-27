@@ -25,7 +25,7 @@ defmodule SymphonyElixir.PathSafety do
   defp resolve_segments(root, resolved_segments, [segment | rest]) do
     candidate_path = join_path(root, resolved_segments ++ [segment])
 
-    case File.lstat(candidate_path) do
+    case segment_stat(candidate_path, segment) do
       {:ok, %File.Stat{type: :symlink}} ->
         with {:ok, target} <- :file.read_link_all(String.to_charlist(candidate_path)) do
           resolved_target = Path.expand(IO.chardata_to_string(target), join_path(root, resolved_segments))
@@ -42,6 +42,14 @@ defmodule SymphonyElixir.PathSafety do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp segment_stat(path, segment) do
+    # Windows reports ENOENT for overlong components, which must not be treated
+    # as an ordinary not-yet-created workspace path.
+    if match?({:win32, _}, :os.type()) and byte_size(:unicode.characters_to_binary(segment, :utf8, {:utf16, :little})) > 510,
+      do: {:error, :enametoolong},
+      else: File.lstat(path)
   end
 
   defp join_path(root, segments) when is_list(segments) do

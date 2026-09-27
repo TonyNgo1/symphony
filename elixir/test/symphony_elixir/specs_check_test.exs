@@ -30,6 +30,15 @@ defmodule SymphonyElixir.SpecsCheckTest do
     assert SpecsCheck.missing_public_specs([dir]) == []
   end
 
+  test "directory scanning accepts native Windows separators" do
+    if match?({:win32, _}, :os.type()) do
+      dir = create_tmp_dir()
+      write_module!(dir, "missing.ex", "defmodule WindowsPath do\n def missing, do: :ok\nend\n")
+      findings = SpecsCheck.missing_public_specs([String.replace(dir, "/", "\\")])
+      assert Enum.map(findings, &SpecsCheck.finding_identifier/1) == ["WindowsPath.missing/0"]
+    end
+  end
+
   test "allows defp without @spec" do
     dir = create_tmp_dir()
 

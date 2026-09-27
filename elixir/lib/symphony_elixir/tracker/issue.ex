@@ -20,6 +20,8 @@ defmodule SymphonyElixir.Tracker.Issue do
     :branch_name,
     :url,
     :assignee_id,
+    :model,
+    :reasoning_effort,
     blocked_by: [],
     labels: [],
     dispatchable: false,
@@ -38,6 +40,8 @@ defmodule SymphonyElixir.Tracker.Issue do
           branch_name: String.t() | nil,
           url: String.t() | nil,
           assignee_id: String.t() | nil,
+          model: String.t() | nil,
+          reasoning_effort: String.t() | nil,
           labels: [String.t()],
           blocked_by: [map()],
           dispatchable: boolean(),
@@ -58,6 +62,16 @@ defmodule SymphonyElixir.Tracker.Issue do
   end
 
   def routable?(%__MODULE__{}, _required_labels), do: false
+
+  @spec same_worker_phase?(t(), t()) :: boolean()
+  def same_worker_phase?(%__MODULE__{native_ref: %{"repo" => _}} = before, after_issue) do
+    worker_phase(before.state) == worker_phase(after_issue.state)
+  end
+
+  def same_worker_phase?(_before, _after), do: true
+
+  defp worker_phase(state) when state in ["Ready", "In progress"], do: :implementation
+  defp worker_phase(state), do: state
 
   defp normalize_label(label) when is_binary(label) do
     label

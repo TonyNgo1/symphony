@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.SSHTest do
   use ExUnit.Case, async: false
+  alias SymphonyElixir.TestSupport.Platform
 
   alias SymphonyElixir.SSH
 
@@ -178,8 +179,8 @@ defmodule SymphonyElixir.SSHTest do
         """
     )
 
-    File.chmod!(fake_ssh, 0o755)
-    System.put_env("PATH", fake_bin_dir <> ":" <> (System.get_env("PATH") || ""))
+    Platform.executable!(fake_ssh)
+    System.put_env("PATH", fake_bin_dir <> Platform.path_separator() <> (System.get_env("PATH") || ""))
   end
 
   defp wait_for_trace!(trace_file, attempts \\ 20)

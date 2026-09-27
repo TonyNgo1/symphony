@@ -184,10 +184,24 @@ defmodule SymphonyElixir.TestSupport do
         "agent:",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
         "  max_turns: #{yaml_value(max_turns)}",
+        "  recovery_enabled: #{yaml_value(Keyword.get(config, :recovery_enabled, false))}",
+        "  checkpoint_interval_turns: #{yaml_value(Keyword.get(config, :checkpoint_interval_turns, 3))}",
+        "  max_consecutive_failures: #{yaml_value(Keyword.get(config, :max_consecutive_failures, 3))}",
+        "  max_no_progress_runs: #{yaml_value(Keyword.get(config, :max_no_progress_runs, 3))}",
+        "  max_rework_cycles: #{yaml_value(Keyword.get(config, :max_rework_cycles, 3))}",
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
         "  max_concurrent_agents_by_state: #{yaml_value(max_concurrent_agents_by_state)}",
         "codex:",
+        "  project_id: #{yaml_value(Keyword.get(config, :codex_project_id))}",
         "  command: #{yaml_value(codex_command)}",
+        "  model: #{yaml_value(Keyword.get(config, :codex_model))}",
+        "  reasoning_effort: #{yaml_value(Keyword.get(config, :codex_reasoning_effort))}",
+        "  review_model: #{yaml_value(Keyword.get(config, :codex_review_model))}",
+        "  review_reasoning_effort: #{yaml_value(Keyword.get(config, :codex_review_reasoning_effort))}",
+        "  parent_review_model: #{yaml_value(Keyword.get(config, :codex_parent_review_model))}",
+        "  parent_review_reasoning_effort: #{yaml_value(Keyword.get(config, :codex_parent_review_reasoning_effort))}",
+        "  integration_model: #{yaml_value(Keyword.get(config, :codex_integration_model))}",
+        "  integration_reasoning_effort: #{yaml_value(Keyword.get(config, :codex_integration_reasoning_effort))}",
         "  approval_policy: #{yaml_value(codex_approval_policy)}",
         "  thread_sandbox: #{yaml_value(codex_thread_sandbox)}",
         "  turn_sandbox_policy: #{yaml_value(codex_turn_sandbox_policy)}",
@@ -206,7 +220,7 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   defp yaml_value(value) when is_binary(value) do
-    "\"" <> String.replace(value, "\"", "\\\"") <> "\""
+    Jason.encode!(value)
   end
 
   defp yaml_value(value) when is_integer(value), do: to_string(value)

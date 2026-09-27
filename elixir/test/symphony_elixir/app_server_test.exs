@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.AppServerTest do
   use SymphonyElixir.TestSupport
+  alias SymphonyElixir.TestSupport.Platform
 
   test "app server rejects the workspace root and paths outside workspace root" do
     test_root =
@@ -53,7 +54,7 @@ defmodule SymphonyElixir.AppServerTest do
 
       File.mkdir_p!(workspace_root)
       File.mkdir_p!(outside_workspace)
-      File.ln_s!(outside_workspace, symlink_workspace)
+      Platform.directory_link!(outside_workspace, symlink_workspace)
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root
@@ -1518,7 +1519,7 @@ defmodule SymphonyElixir.AppServerTest do
 
       File.mkdir_p!(test_root)
       System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
-      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+      System.put_env("PATH", test_root <> Platform.path_separator() <> (previous_path || ""))
 
       File.write!(fake_ssh, """
       #!/bin/sh
@@ -1551,7 +1552,7 @@ defmodule SymphonyElixir.AppServerTest do
       done
       """)
 
-      File.chmod!(fake_ssh, 0o755)
+      Platform.executable!(fake_ssh)
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: "/remote/workspaces",

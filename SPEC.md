@@ -625,6 +625,9 @@ not require recognizing or validating extension fields unless that extension is 
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
 - `codex.command`: shell command string, default `codex app-server`
+- `codex.project_id`: optional existing app-server project ID. New worker threads send it in
+  `thread/start`; the response must confirm the same ID before running any turn. It applies to
+  all worker roles and retries without changing workspace paths or existing thread assignments.
 - `codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
 - `codex.thread_sandbox`: Codex `SandboxMode` value, default implementation-defined
 - `codex.turn_sandbox_policy`: Codex `SandboxPolicy` value, default implementation-defined
@@ -2310,3 +2313,158 @@ Extension config:
 - Cleanup and observability:
   - Operators need to know which host owns a run, where its workspace lives, and whether cleanup
     happened on the right machine.
+
+## GitHub Projects extension in this fork
+
+GitHub scheduling uses Project v2 Status rather than issue open/closed state. It requires
+all seven ArtCom workflow statuses and native dependency/hierarchy reads. Parent hierarchy
+does not create dependency edges. Parent bootstrap is Ready; other active parent work is
+held until every child is integrated and Done. A child requires a managed In progress
+feature parent. Native unfinished blockers make every active item non-dispatchable.
+
+Scheduling filters required labels before fetching relationships. Native relationships
+are read fresh in GraphQL batches of at most ten issues, with twenty entries per
+connection. Explicit truncation falls back to complete REST pagination; partial errors
+or missing relationship metadata fail closed. Completion transitions retain fresh
+relationship and commit-evidence checks. REST ETags must be revalidated on every read;
+cached representations must never replace failed reads. Cache entries are bounded,
+credential-scoped, and invalidated on mutation attempts. GitHub quota backoff is shared
+across workers using that credential, resumes after reset, and never replays mutations.
+Expose process-local tracker_api request/cost/backoff metrics without credentials.
+
+Ready and In progress share the implementation role. Any other GitHub role transition
+ends that worker; a new app-server thread resumes from the same workspace and workpad.
+Before a worker issues a cross-phase set_project_status write, it synchronously
+registers the target with the orchestrator. Reconciliation of that exact target
+preserves the worker and claim until the app-server turn finishes, so a visible
+tracker write cannot race with delivery of its tool response. The handoff expires
+after 60 seconds; timer tokens cannot affect replacement workers. Unrelated tracker
+state changes and usage-limit stops are not deferred.
+Human Review cannot dispatch or be exited through worker status tools. Manual parent
+Human Review -> Integrating is the approval signal; Git merge/validation remains agent work.
+Worker prompts identify normalized parent Project status as dispatch context, distinct
+from native issue open/closed. Fresh implementation may create an absent own branch
+from its existing parent feature branch when no prior work needs recovery. Review and
+integration require an existing source branch. The no-op harness fails promptly if
+a child enters Human Review; only the planned parent review gates receive simulated approval.
+
+workspace.retain_terminal (boolean, default false) disables automatic terminal cleanup
+when enabled, including startup, reconciliation and retry paths. Local initial setup
+uses a sibling .initializing marker; a completed setup removes it.
+
+Structured usage_limit_exceeded / usageLimitExceeded errors are not ordinary retries:
+stop the affected worker, cancel queued retries, and pause dispatch for the process
+lifetime. Workflow reload and orchestrator supervision restart retain this pause.
+Expose dispatch_paused in snapshots/API and show the pause in the terminal dashboard.
+
+GitHub review approvals require structured passing validation tied to the current
+source branch SHA. Bug-labeled issues additionally require a named permanent
+regression check with failing-before/passing-after evidence on distinct SHAs.
+The adapter persists review evidence in the workpad's reserved Review: line and
+preserves it across ordinary workpad replacements. Transitions back to implementation
+or review invalidate approval. A question-only Human Review pause does not approve work.
+Done requires a saved review matching the remote source head, passing validation of
+the exact remote target head, and GitHub-confirmed ancestry of the reviewed commit
+in that target. Children target their native parent's feature branch; features
+target main. Read failures or incomplete evidence fail closed.
+
+Every issue has exactly one fenced symphony-acceptance JSON block with version 1 and
+nonempty criteria. Criteria have unique A-number IDs, descriptions and validation
+policies. Approval and Done require exactly one passing entry per criterion, bound
+to the reviewed source or integrated target SHA respectively. The saved review stores
+the canonical contract hash and acceptance evidence; changes to criteria, validation
+policy or coverage require fresh review. Missing/legacy contracts and approvals fail
+closed. The current issue body is read on completion transitions, not assumed from
+the worker's original prompt. A review policy specifies reproducible instructions;
+its results remain reviewer attestations. A github_check policy specifies the exact
+check name and publisher app ID; evidence includes a check_run_id that the adapter
+reads from the same repository and verifies as completed/success at the exact SHA.
+The adapter does not execute local commands, trigger CI or certify test transcripts.
+
+The offline github.plan command validates structured requirements and issues, using
+the same acceptance schema. It requires complete declared requirement coverage and
+rejects invalid hierarchy, references, duplicate IDs, explicit dependency cycles and
+implicit lifecycle deadlocks. Feature bootstrap and completion are distinct graph
+nodes. Valid output contains Backlog issue bodies and unresolved local relationship
+keys for the authorized publisher. It neither writes GitHub nor releases work; the
+publisher must verify actual native relationships and board state after publication.
+
+Opt-in local GitHub recovery persists compact workpads, exact Codex thread IDs,
+role/workspace/commit snapshots, and bounded attempt history outside disposable clones.
+Workers checkpoint at milestones; a missing workpad at configured turn intervals or
+normal rotation permits one checkpoint-only turn. Refusal fails the attempt. Quota
+errors never launch a checkpoint turn. Historical workpads are handoff data, not new
+instructions. Human tasks are not resumed automatically.
+
+Positive configurable limits bound consecutive failed/interrupted attempts, successful
+runs without repository/phase progress, and review/integration returns to implementation.
+Workpad edits alone do not reset progress counters. Defaults are three for each limit
+and the checkpoint interval. On exhaustion, persist a local pause before attempting
+GitHub writes, clear review approval, and move the issue to Human Review. Read/write
+failures keep the issue blocked and publication retries without spawning a model worker.
+A human release resets the recovery counters. Records survive process restarts and
+workspace startup repair; corrupt records fail closed. Live recorded owners prevent
+duplicate dispatch after scheduler restart. One scheduler owns each workspace root;
+this mechanism is not a cross-host distributed lock. Other trackers and SSH workers
+are unchanged by this extension.
+
+The opt-in no-op acceptance harness starts from an approved six-issue fixture and
+uses the real GitHub adapter, scheduler and Git transport. It records app-server
+role/thread starts and successful status-tool receipts. The controller may create
+and release fixtures and simulate human approvals, but ordinary lifecycle changes
+must come from workers. Distinct empty commits preserve the baseline Git tree while
+allowing meaningful ancestry assertions. Scripted and real-Codex modes are reported
+separately. Failures retain evidence and quarantine only the run's issues in Backlog.
+The ArtCom example and real-Codex harness keep workspace-write with on-request
+approvals routed through Codex's automatic reviewer. Git metadata writes require
+the normal reviewed escalation path; unresolved approval requests remain blocking.
+Real-Codex acceptance uses a 30-second scheduler poll and observes human pauses
+for at least two polls to avoid the scripted mode's higher API request rate.
+
+Optional GitHub Project single-select Model and Reasoning effort fields populate
+normalized issue model and reasoning_effort values. Missing/blank fields use
+codex.model and codex.reasoning_effort defaults. Review and integration use
+separate review_model/review_reasoning_effort and integration_model/
+integration_reasoning_effort defaults, falling back to global settings without
+inheriting implementation overrides. In review, issues labeled type:feature first
+use optional parent_review_model/parent_review_reasoning_effort, with independent
+missing/blank fallback to the review and then global settings. This does not affect
+implementation or integration selection; trackers without that label retain the
+existing behavior. ArtCom configures high effort for all roles, Sol child reviews,
+Astra parent reviews and Sol integration; its planner selects high or clears old
+Project effort overrides before release. Selections are resolved once per worker,
+validated against the paginated Codex model catalog, and sent explicitly in
+thread/start (model) and turn/start (model and effort). The server must confirm
+the requested thread model; silent substitution is rejected before generation.
+Selection edits affect future workers, never an existing worker's continuation.
+Unsupported selections hold the affected issue locally without automatic retry;
+a changed effective selection or process restart permits revalidation. Catalog
+transport errors use ordinary backoff, and quota errors retain global pause rules.
+Planner writes validate Project options and read back results; execution workers
+cannot rewrite model fields. Resolved selections appear in runtime observability.
+The optional model-routing harness verifies Project readback and wire settings;
+offline protocol tests cover invalid selections and concurrent isolation.
+
+### GitHub asset approval extension
+
+ArtCom generation tasks must be classified with `asset_generation: true` in plans.
+The compiler requires a human_asset criterion and emits the asset-generation label.
+At implementation launch, that label or a valid human_asset contract forces
+gpt-6-astra/high regardless of Project fields or workflow defaults. Unavailability
+blocks the issue before model work; there is no automatic downgrade. Reviews and
+integration retain separate routing and return asset revisions to implementation.
+New asset classification on a tracker refresh ends the current implementation worker
+before its next turn, allowing a fresh Astra worker to resume the persistent workspace.
+
+An acceptance criterion may use validation kind `human_asset`, with a repository-
+relative manifest path, nonempty reviewer login allowlist and inspection instructions.
+Evidence references a GitHub issue comment by `approval_comment_id`. Only a `User`
+on that allowlist may approve the complete exact criterion and manifest Git blob
+in a separate `symphony-asset-approval` fenced JSON block under `## Asset Approval`.
+The comment must belong to the worker's issue. A workpad claim is insufficient.
+Source review and integrated-target completion must verify every manifest file
+against a complete remote Git tree, including any present Godot import sidecars.
+Malformed, missing, changed or unreadable evidence fails closed. This supplements
+technical acceptance and does not replace the parent feature's final human pause.
+Without asset approval, a reviewer pauses at Human Review without passing evidence;
+the human posts approval and releases the issue to In review for technical sign-off.

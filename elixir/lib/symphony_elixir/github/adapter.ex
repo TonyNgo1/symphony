@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.GitHub.Adapter do
   @moduledoc """
   GitHub Issues-backed tracker adapter.
+
+  Workflow states may come from GitHub Project status fields rather than
+  GitHub's native issue open/closed state.
   """
 
   @behaviour SymphonyElixir.Tracker
@@ -8,21 +11,16 @@ defmodule SymphonyElixir.GitHub.Adapter do
   alias SymphonyElixir.GitHub.{AgentTool, Client}
   alias SymphonyElixir.Tracker.Issue
 
-  @active_states ["open"]
-  @terminal_states ["closed"]
-
   @spec validate_config(map()) :: :ok | {:error, term()}
   def validate_config(tracker_settings) do
     with :ok <-
            validate_states(
              tracker_settings.active_states,
-             @active_states,
              :missing_github_active_states
            ),
          :ok <-
            validate_states(
              tracker_settings.terminal_states,
-             @terminal_states,
              :missing_github_terminal_states
            ) do
       Client.validate_settings(tracker_settings)
@@ -30,7 +28,9 @@ defmodule SymphonyElixir.GitHub.Adapter do
   end
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_issues_by_states(states), do: client_module().fetch_issues_by_states(states)
+  def fetch_issues_by_states(states) do
+    client_module().fetch_issues_by_states(states)
+  end
 
   @spec fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_ids(issue_ids), do: client_module().fetch_issues_by_ids(issue_ids)
@@ -39,25 +39,26 @@ defmodule SymphonyElixir.GitHub.Adapter do
   def agent_tool_specs, do: AgentTool.tool_specs()
 
   @spec execute_agent_tool(String.t(), term(), keyword()) :: map()
-  def execute_agent_tool(tool, arguments, opts), do: AgentTool.execute(tool, arguments, opts)
+  def execute_agent_tool(tool, arguments, opts),
+    do: AgentTool.execute(tool, arguments, opts)
 
   @spec secret_environment_names(map()) :: [String.t()]
-  def secret_environment_names(tracker_settings), do: Client.secret_environment_names(tracker_settings)
+  def secret_environment_names(tracker_settings),
+    do: Client.secret_environment_names(tracker_settings)
 
   defp client_module do
     Application.get_env(:symphony_elixir, :github_client_module, Client)
   end
 
-  defp validate_states(states, allowed_states, _missing_error) when is_list(states) do
-    if Enum.all?(states, &(normalize_state(&1) in allowed_states)) do
+  defp validate_states(states, missing_error) when is_list(states) do
+    allowed = if missing_error == :missing_github_active_states, do: ["Ready", "In progress", "In review", "Integrating"], else: ["Done"]
+
+    if states != [] and Enum.all?(states, &(&1 in allowed)) do
       :ok
     else
       {:error, :invalid_github_states}
     end
   end
 
-  defp validate_states(_states, _allowed_states, missing_error), do: {:error, missing_error}
-
-  defp normalize_state(state) when is_binary(state), do: state |> String.trim() |> String.downcase()
-  defp normalize_state(_state), do: ""
+  defp validate_states(_states, missing_error), do: {:error, missing_error}
 end

@@ -1,5 +1,6 @@
 defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
   use ExUnit.Case, async: false
+  alias SymphonyElixir.TestSupport.Platform
 
   alias Mix.Tasks.Workspace.BeforeRemove
 
@@ -305,12 +306,12 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
       File.mkdir_p!(bin_dir)
       File.write!(log_path, "")
       original_path = System.get_env("PATH") || ""
-      path_with_binaries = Enum.join([bin_dir, original_path], ":")
+      path_with_binaries = Enum.join([bin_dir, original_path], Platform.path_separator())
 
       Enum.each(scripts, fn {name, script} ->
         path = Path.join(bin_dir, name)
         File.write!(path, script)
-        File.chmod!(path, 0o755)
+        Platform.executable!(path)
       end)
 
       with_env(
@@ -328,7 +329,7 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
   end
 
   defp with_path(paths, fun) do
-    with_env(%{"PATH" => Enum.join(paths, ":")}, fun)
+    with_env(%{"PATH" => Enum.join(paths, Platform.path_separator())}, fun)
   end
 
   defp with_env(overrides, fun) do
