@@ -1,6 +1,7 @@
 # Read-only preflight. Never start the Symphony application/scheduler here.
-Application.ensure_all_started(:req)
-Application.ensure_all_started(:yaml_elixir)
+{:ok, _} = Application.ensure_all_started(:req)
+{:ok, _} = Application.ensure_all_started(:yaml_elixir)
+{:ok, _} = SymphonyElixir.GitHub.Http.start_link([])
 SymphonyElixir.Workflow.set_workflow_file_path(System.fetch_env!("SYMPHONY_CHECK_WORKFLOW"))
 :ok = SymphonyElixir.Config.validate!()
 config = SymphonyElixir.Config.settings!()

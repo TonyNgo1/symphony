@@ -359,6 +359,8 @@ codex:
   ArtCom's `run-symphony.ps1 -Handoff GH-123` loads that environment and works while the
   scheduler is running. The runtime saves IDs; it does not automatically resume human tasks.
 - The ArtCom host launcher supports `-CheckOnly` for read-only configuration, board and prompt validation.
+  Its standalone check starts the shared GitHub HTTP service explicitly under
+  `mix run --no-start`; it does not start the scheduler or dispatch workers.
   The bundled WORKFLOW.md is the ArtCom example; the host repository's root workflow is authoritative.
 
 ### Jira Cloud adapter
